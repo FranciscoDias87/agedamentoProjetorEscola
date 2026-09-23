@@ -1,21 +1,33 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createApp } from '../server.js';
+import { DatabaseSync } from 'node:sqlite';
+import { mkdtempSync, rmSync } from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { issueInvite } from '../security.js';
+function fixture(t, options = {}) {
+ const dir = mkdtempSync(path.join(os.tmpdir(), 'agenda-test-'));
+ const database = path.join(dir, 'agenda.sqlite');
+ const server = createApp({ database, ...options });
+ const db = new DatabaseSync(database);
+ t.after(async () => { await new Promise(resolve => server.close(resolve)); db.close(); rmSync(dir, { recursive: true, force: true }); });
+ return { server, invite: email => issueInvite(db, email) };
+}
 
 test('reservas compartilhadas, conflitos e permissões', async t => {
-  const server = createApp({ inviteCode: 'codigo-escola-teste' });
+  const { server, invite } = fixture(t);
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
-  t.after(() => new Promise(resolve => server.close(resolve)));
   const base = `http://127.0.0.1:${server.address().port}`;
   async function request(route, method = 'GET', body, cookie) {
     const response = await fetch(base + route, { method, headers: { 'Content-Type': 'application/json', ...(cookie ? { Cookie: cookie } : {}) }, ...(body ? { body: JSON.stringify(body) } : {}) });
     return { status: response.status, data: await response.json(), cookie: response.headers.get('set-cookie')?.split(';')[0] };
   }
   assert.equal((await request('/api/bookings?day=2099-01-10')).status, 401);
-  const registration = { name: 'Ana', email: 'ana@escola.test', password: 'senha-teste-123', inviteCode: 'codigo-escola-teste' };
+  const registration = { name: 'Ana', email: 'ana@escola.test', password: 'senha-teste-123', inviteCode: invite('ana@escola.test') };
   assert.equal((await request('/api/register', 'POST', { ...registration, inviteCode: 'errado' })).status, 403);
   const ana = await request('/api/register', 'POST', registration);
-  const bia = await request('/api/register', 'POST', { ...registration, name: 'Bia', email: 'bia@escola.test' });
+  const bia = await request('/api/register', 'POST', { ...registration, name: 'Bia', email: 'bia@escola.test', inviteCode: invite('bia@escola.test') });
   assert.equal(ana.status, 200);
   const slot = { classroom: '7º B', day: '2099-01-10', start: '09:00', end: '10:00' };
   const simultaneous = await Promise.all([request('/api/bookings', 'POST', slot, ana.cookie), request('/api/bookings', 'POST', slot, bia.cookie)]);
@@ -37,11 +49,10 @@ test('reservas compartilhadas, conflitos e permissões', async t => {
 });
 
 test('estrutura permite aprovação futura sem mudar reservas existentes', async t => {
-  const server = createApp({ inviteCode: 'codigo-escola-teste', requireApproval: true });
+  const { server, invite } = fixture(t, { requireApproval: true });
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
-  t.after(() => new Promise(resolve => server.close(resolve)));
   const base = `http://127.0.0.1:${server.address().port}`;
-  const auth = await fetch(base + '/api/register', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: 'Ana', email: 'ana@escola.test', password: 'senha-teste', inviteCode: 'codigo-escola-teste' }) });
+  const auth = await fetch(base + '/api/register', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: 'Ana', email: 'ana@escola.test', password: 'senha-teste-123', inviteCode: invite('ana@escola.test') }) });
   const headers = { 'Content-Type': 'application/json', Cookie: auth.headers.get('set-cookie').split(';')[0] };
   const booking = await fetch(base + '/api/bookings', { method: 'POST', headers, body: JSON.stringify({ classroom: 'A', day: '2099-01-10', start: '09:00', end: '10:00' }) });
   assert.equal(booking.status, 201);
